@@ -21,7 +21,6 @@ import re
 import sys
 import json
 import time
-import hmac
 import signal
 import socket
 import base64
@@ -34,7 +33,7 @@ import subprocess
 import tempfile
 import uuid
 from urllib.request import Request, urlopen
-from urllib.parse import quote, unquote
+from urllib.parse import quote
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler
 
