@@ -392,7 +392,6 @@ TUIC_PORT = int(TUIC_PORT_STR) if (TUIC_PORT_STR and TUIC_PORT_STR.isdigit()) el
 S5_PORT_STR = _get_env("S5_PORT", "")
 S5_PORT = int(S5_PORT_STR) if (S5_PORT_STR and S5_PORT_STR.isdigit()) else None
 
-REALITY_SNI = _get_env("DOMAIN", "") or _get_env("REALITY_SNI", "www.iij.ad.jp")
 HY2_SNI = _get_env("HY2_SNI", "www.bing.com")
 CLEAN_DELAY = _get_int("CLEAN_DELAY", 180, minimum=0)
 SINGBOX_RESTART_DELAY = _get_int("SINGBOX_RESTART_DELAY", 3, minimum=0)
@@ -400,7 +399,122 @@ PROBE_TIMEOUT = _get_int("PROBE_TIMEOUT", 10, minimum=1)
 BATCH_ROUNDS = _get_int("BATCH_ROUNDS", 8, minimum=0)
 MAX_WORKERS = _get_int("MAX_WORKERS", 0, minimum=0) or min(4, os.cpu_count() or 1)
 IDLE_TIMEOUT = _get_int("IDLE_TIMEOUT", 1800, minimum=0)
-NODE_TAG = _get_env("NODE_NAME", "") or _get_env("NODE_TAG", "").strip()
+NODE_TAG = _get_env("NODE_NAME", "") or _get_env("NODE_TAG", "").strip() or "Enterprise-Edge"
+
+# ============================================================================
+# Geo-Localized TLS 1.3 / H2 Niche Certificate Pools
+# ============================================================================
+NICHE_REALITY_DOMAINS = {
+    "JP": [
+        "www.digital.go.jp",     # 日本数字厅 (权威政府机构，TLS 1.3 + H2)
+        "www.kyoto-u.ac.jp",     # 京都大学 (顶级学术高校，TLS 1.3 + H2)
+        "www.iij.ad.jp",         # IIJ网络 (日本骨干ISP，TLS 1.3)
+        "line.me",               # LINE 官方 (国民级通讯服务，TLS 1.3)
+    ],
+    "US": [
+        "swdist.apple.com",      # Apple全球软件分发 (极高信誉海量流量，TLS 1.3 + H2)
+        "gateway.icloud.com",    # Apple iCloud官方网关 (TLS 1.3 + H2)
+        "images-na.ssl-images-amazon.com", # Amazon CloudFront CDN (TLS 1.3 + H2)
+    ],
+    "HK": [
+        "www.hku.hk",            # 香港大学 (顶级高校，TLS 1.3 + H2)
+        "www.gov.hk",            # 香港特区政府官方 (TLS 1.3 + H2)
+        "www.cityu.edu.hk",      # 香港城市大学 (TLS 1.3 + H2)
+    ],
+    "SG": [
+        "www.gov.sg",            # 新加坡政府官方 (TLS 1.3 + H2)
+        "www.nus.edu.sg",        # 新加坡国立大学 (TLS 1.3 + H2)
+        "www.singtel.com",       # 新加坡电信 (TLS 1.3 + H2)
+    ],
+    "KR": [
+        "www.samsung.com",       # 三星电子全球 (TLS 1.3 + H2)
+        "www.daum.net",          # Daum 门户 (TLS 1.3 + H2)
+    ],
+    "DE": [
+        "www.cam.ac.uk",         # 欧洲/剑桥大学 (TLS 1.3 + H2)
+        "www.spiegel.de",        # 德国明镜周刊 (TLS 1.3 + H2)
+        "www.bund.de",           # 德国联邦政府 (TLS 1.3 + H2)
+    ],
+    "EU": [
+        "www.cam.ac.uk",
+        "www.spiegel.de",
+    ],
+    "GB": [
+        "www.cam.ac.uk",
+        "www.ox.ac.uk",
+    ],
+}
+
+DEFAULT_REALITY_DOMAINS = [
+    "swdist.apple.com",
+    "gateway.icloud.com",
+    "images-na.ssl-images-amazon.com",
+]
+
+
+def detect_server_country(server_ip=""):
+    """Quickly detect server egress country ISO code using multi-source probes."""
+    manual = _get_env("SERVER_COUNTRY", "") or _get_env("REALITY_COUNTRY", "")
+    if manual:
+        return manual.strip().upper()
+
+    try:
+        req = Request("https://cloudflare.com/cdn-cgi/trace", headers={"User-Agent": "curl/7.88.1"})
+        with urlopen(req, timeout=3) as resp:
+            lines = resp.read().decode("utf-8", "ignore").splitlines()
+            for line in lines:
+                if line.startswith("loc="):
+                    loc = line.split("=", 1)[1].strip().upper()
+                    if len(loc) == 2 and loc.isalpha():
+                        return loc
+    except Exception:
+        pass
+
+    if server_ip and server_ip != "127.0.0.1":
+        for api in (f"http://ip-api.com/json/{server_ip}?fields=countryCode", f"https://ipwho.is/{server_ip}"):
+            try:
+                req = Request(api, headers={"User-Agent": "curl/7.88.1"})
+                with urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8", "ignore"))
+                    code = data.get("countryCode") or data.get("country_code")
+                    if code and len(code) == 2:
+                        return code.upper()
+            except Exception:
+                pass
+    return "US"
+
+
+def select_geo_sni(server_ip="", country=""):
+    """Select a high-reputation, localized TLS 1.3 SNI target matching server's IP."""
+    manual = _get_env("DOMAIN", "") or _get_env("REALITY_SNI", "")
+    if manual:
+        return manual.strip()
+
+    cc = (country or detect_server_country(server_ip)).upper()
+    pool = NICHE_REALITY_DOMAINS.get(cc)
+    if not pool:
+        if cc in ("FR", "NL", "IT", "ES", "CH", "SE", "NO"):
+            pool = NICHE_REALITY_DOMAINS.get("EU", DEFAULT_REALITY_DOMAINS)
+        else:
+            pool = DEFAULT_REALITY_DOMAINS
+
+    seed = server_ip or "default-edge"
+    idx = int(hashlib.md5(seed.encode("utf-8")).hexdigest(), 16) % len(pool)
+    return pool[idx]
+
+
+REALITY_SNI = _get_env("DOMAIN", "") or _get_env("REALITY_SNI", "") or "swdist.apple.com"
+
+
+def init_server_identity():
+    global REALITY_SNI
+    server_ip = state.get("server_ip") or detect_public_ip()
+    state["server_ip"] = server_ip
+    country = state.get("country") or detect_server_country(server_ip)
+    state["country"] = country
+    REALITY_SNI = select_geo_sni(server_ip, country)
+    _log(f"identity: ip={server_ip} country={country} sni={REALITY_SNI}")
+    return server_ip, country, REALITY_SNI
 
 
 def _derive_sub_path():
@@ -1095,8 +1209,13 @@ def generate_nodes(argo_domain, server_ip):
 
 
 def refresh_subscription(argo_domain=None):
+    global REALITY_SNI
     server_ip = state.get("server_ip") or detect_public_ip()
     state["server_ip"] = server_ip
+    if not REALITY_SNI or REALITY_SNI in DEFAULT_REALITY_DOMAINS:
+        country = state.get("country") or detect_server_country(server_ip)
+        state["country"] = country
+        REALITY_SNI = select_geo_sni(server_ip, country)
     if argo_domain is not None:
         state["argo_domain"] = argo_domain
     payload = generate_nodes(state.get("argo_domain"), server_ip)
@@ -1782,6 +1901,7 @@ def main():
 
     ensure_binaries()
     ensure_tls_keys()
+    init_server_identity()
     build_config()
 
     _spawn_core()
