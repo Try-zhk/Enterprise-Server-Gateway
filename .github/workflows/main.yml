@@ -1,0 +1,104 @@
+name: Build Native C-Extension Engine (Nuitka)
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "app_src.py"
+      - ".github/workflows/build_so.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Check if app_src.py exists
+        id: check_src
+        run: |
+          if [ -f "app_src.py" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "app_src.py not found, skipping compilation."
+          fi
+
+      - name: Set up Python ${{ matrix.python-version }}
+        if: steps.check_src.outputs.exists == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Nuitka & Build Dependencies
+        if: steps.check_src.outputs.exists == 'true'
+        run: |
+          python -m pip install --upgrade pip
+          pip install nuitka zstandard ordered-set
+
+      - name: Compile app_src.py into Native C-Extension (.so)
+        if: steps.check_src.outputs.exists == 'true'
+        run: |
+          mkdir -p dist
+          python -m nuitka \
+            --module \
+            --lto=yes \
+            --strip=yes \
+            --remove-output \
+            --output-dir=dist \
+            app_src.py
+
+          # Extract major and minor version numbers (e.g. 3.11 -> 311)
+          VER_TAG=$(echo "${{ matrix.python-version }}" | sed 's/\.//')
+          TARGET_NAME="app.py${VER_TAG}_x86_64.so"
+
+          # Rename the generated .so to standard release artifact name
+          SO_FILE=$(ls dist/app_src*.so | head -n 1)
+          cp "$SO_FILE" "dist/${TARGET_NAME}"
+          cp "$SO_FILE" "dist/app.so"
+          ls -la dist/
+
+      - name: Upload Build Artifact
+        if: steps.check_src.outputs.exists == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-so-py${{ matrix.python-version }}
+          path: dist/*.so
+
+  release-assets:
+    needs: build-linux-x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_files
+
+      - name: Prepare Release Directory
+        run: |
+          mkdir -p final_assets
+          find release_files/ -type f -name "*.so" -exec cp {} final_assets/ \;
+          ls -la final_assets/
+
+      - name: Publish or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main') && hashFiles('release_files/**/*.so') != ''
+        with:
+          tag_name: latest
+          name: "Enterprise Native Core (C-Extension Engine)"
+          body: |
+            Automated Native C-Extension Engine built with Nuitka & LTO.
+            Provides native C machine-code execution for Python 3.9, 3.10, 3.11, and 3.12.
+          files: final_assets/*.so
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
