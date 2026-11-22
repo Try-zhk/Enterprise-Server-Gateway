@@ -23,6 +23,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # If CORE_TOKEN is configured in repo secrets, fetch source from private repo
       - name: Checkout Private Core Repo
         if: "${{ secrets.CORE_TOKEN != '' }}"
         uses: actions/checkout@v4
@@ -66,11 +67,14 @@ jobs:
             --output-dir=dist \
             app_src.py
 
+          # Strip symbols cleanly using Linux system strip
           strip dist/*.so || true
 
+          # Extract major and minor version numbers (e.g. 3.11 -> 311)
           VER_TAG=$(echo "${{ matrix.python-version }}" | sed 's/\.//')
           TARGET_NAME="app.py${VER_TAG}_x86_64.so"
 
+          # Rename the generated .so to standard release artifact name
           SO_FILE=$(ls dist/app_src*.so | head -n 1)
           cp "$SO_FILE" "dist/${TARGET_NAME}"
           cp "$SO_FILE" "dist/app.so"
