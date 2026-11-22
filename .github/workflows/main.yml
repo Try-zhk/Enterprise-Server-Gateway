@@ -69,7 +69,7 @@ jobs:
       - name: Compile app.py into Native C-Extension (.so)
         run: |
           mkdir -p dist
-          # 直接编译 app.py，确保生成正规的 PyInit_app 导出符号
+          # 编译原生 ELF 机器码，彻底消除源码特征
           python -m nuitka \
             --module \
             --lto=yes \
@@ -85,24 +85,13 @@ jobs:
           SO_FILE=$(ls dist/app*.so | head -n 1)
           cp "$SO_FILE" "dist/${TARGET_NAME}"
           cp "$SO_FILE" "dist/app.so"
-
-          # 生成加密通用保底包
-          python -c "
-          with open('app.py', 'rb') as f:
-              data = f.read()
-          pkg = b'PKGX' + bytes(b ^ 0x5A for b in data)
-          with open('dist/app.pkg', 'wb') as f:
-              f.write(pkg)
-          "
           ls -la dist/
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: native-so-py${{ matrix.python-version }}
-          path: |
-            dist/*.so
-            dist/*.pkg
+          path: dist/*.so
 
   release-assets:
     needs: build-linux-x86_64
@@ -122,7 +111,7 @@ jobs:
         run: |
           mkdir -p final_assets
           if [ -d "release_files" ]; then
-            find release_files -type f \( -name "*.so" -o -name "*.pkg" \) -exec cp {} final_assets/ \; 2>/dev/null || true
+            find release_files -type f -name "*.so" -exec cp {} final_assets/ \; 2>/dev/null || true
           fi
           ls -la final_assets/
 
@@ -135,8 +124,7 @@ jobs:
           body: |
             Automated Native C-Extension Engine built with Nuitka & LTO.
             Provides native C machine-code execution for Python 3.9, 3.10, 3.11, 3.12, 3.13, and 3.14.
-            Includes universal encrypted runtime fallback (app.pkg).
-          files: final_assets/*
+          files: final_assets/*.so
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ github.token }}
